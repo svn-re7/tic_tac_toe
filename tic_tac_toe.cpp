@@ -16,20 +16,31 @@ struct ConfigData {
     int windowH; // длина окна
     COLORREF bgColor; // цвет заднего фона
     int gridColorOffset; // цвет сетки
+    int fieldSize;       // количество клеток
 };
+
+#define MAX_FIELD_SIZE 100 // максимально допустимое кол-во клеток
+
+struct SharedData {
+    int activeWindows;                 // счетчик запущенных копий
+    int cells[MAX_FIELD_SIZE][MAX_FIELD_SIZE]; // массив игрового поля (0-пусто 1-круг 2-крест)
+};
+
+SharedData* g_pSharedData = nullptr;
+SharedData localData = { 0 }; // Временный объект для работы, пока нет маппинга
 
 // глобальный экземпляр конфига (по умолчанию)
-ConfigData g_config = { 40, 320, 240, RGB(0, 0, 255), 0 };
+ConfigData g_config = { 40, 320, 240, RGB(0, 0, 255), 0, 10};
 int g_method = 2; // переменная для хранения метода чтения/записи (по умолчанию - fopen)
 
-struct CellPos {
-    int x, y;
-    bool operator<(const CellPos& other) const {
-        if (x != other.x) return x < other.x;
-        return y < other.y;
-    }
-};
-std::map<CellPos, int> g_cells;
+//struct CellPos {
+//    int x, y;
+//    bool operator<(const CellPos& other) const {
+//        if (x != other.x) return x < other.x;
+//        return y < other.y;
+//    }
+//};
+//std::map<CellPos, int> g_cells;
 
 COLORREF GetRainbowColor(int offset) {
     BYTE r, g, b;
@@ -282,6 +293,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     bool runBench = false;
     int val = -1; // значения для N
+    int valS = -1; // S кол-во клеток
     int nArgs;
     LPWSTR* szArglist = CommandLineToArgvW(GetCommandLineW(), &nArgs); // массив строк командной строки, список аргументов
     if (NULL != szArglist) {
@@ -298,6 +310,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             //  число без флага (N)
             else if (iswdigit(szArglist[i][0])) { // если символ - цифра
                 val = _wtoi(szArglist[i]);
+            }
+            // Флаг -s для количества клеток
+            else if (wcscmp(szArglist[i], L"-s") == 0 && i + 1 < nArgs) {
+                valS = _wtoi(szArglist[i + 1]);
+                i++;
             }
         }
         LocalFree(szArglist);
@@ -320,6 +337,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         if (val < 30) val = 30; // порог
         g_config.N = val;
     }
+
+    if (valS != -1)
+    {
+        if (valS < 3) valS = 3;
+        else if (valS > MAX_FIELD_SIZE)
+        {
+            valS = MAX_FIELD_SIZE;
+        }
+        g_config.fieldSize = valS;
+    }
+
+    g_pSharedData = &localData;
 
     const wchar_t CLASS_NAME[] = L"MyWinAPIClass";
 
@@ -373,50 +402,44 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         int height = rect.bottom; // длина холста
         int cellSize = g_config.N; // размер клетки
 
-        // рисуем вертикальные линии
-        for (int x = 0; x <= width; x += cellSize)
-        {
-            MoveToEx(hdc, x, 0, NULL);
-            LineTo(hdc, x, height);
+        int fSize = g_config.fieldSize;
+
+        // рисуем сеткупо количеству клеток
+        for (int i = 0; i <= fSize; i++) {
+            // вертикальные
+            MoveToEx(hdc, i * cellSize, 0, NULL);
+            LineTo(hdc, i * cellSize, fSize * cellSize);
+            // горизонтальные
+            MoveToEx(hdc, 0, i * cellSize, NULL);
+            LineTo(hdc, fSize * cellSize, i * cellSize);
         }
 
-        // рисуем горизонтальные линии
-        for (int y = 0; y <= height; y += cellSize)
-        {
-            MoveToEx(hdc, 0, y, NULL);
-            LineTo(hdc, width, y);
-        }
+        // рисуем фигуры из массива
+        for (int y = 0; y < fSize; y++) {
+            for (int x = 0; x < fSize; x++) {
+                int type = g_pSharedData->cells[x][y];
+                if (type == 0) continue;
 
-        // рисуем фигуры
-        for (std::map<CellPos, int>::iterator it = g_cells.begin(); it != g_cells.end(); ++it) { // проходимся по словарю
-            CellPos pos = it->first;
-            int type = it->second;
-            int left = pos.x * g_config.N;
-            int top = pos.y * g_config.N;
-            int right = left + g_config.N;
-            int bottom = top + g_config.N;
+                int left = x * cellSize;
+                int top = y * cellSize;
+                int right = left + cellSize;
+                int bottom = top + cellSize;
 
-            if (type == 1) { // рисуем круг
-                HPEN hWhitePen = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
-                HPEN hTempPen = (HPEN)SelectObject(hdc, hWhitePen);
-                Ellipse(hdc, left + 5, top + 5, right - 5, bottom - 5);
-                SelectObject(hdc, hTempPen); // возвращаем перо для сетки
-                DeleteObject(hWhitePen);
-            }
-            else if (type == 2) { // рисуем крестик
                 HPEN hWhitePen = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
                 HPEN hTempPen = (HPEN)SelectObject(hdc, hWhitePen);
 
-                // две линии крест накрест
-                MoveToEx(hdc, left + 5, top + 5, NULL);
-                LineTo(hdc, right - 5, bottom - 5);
-                MoveToEx(hdc, right - 5, top + 5, NULL);
-                LineTo(hdc, left + 5, bottom - 5);
-                SelectObject(hdc, hTempPen); // возвращаем перо для сетки
+                if (type == 1) Ellipse(hdc, left + 5, top + 5, right - 5, bottom - 5);
+                else if (type == 2) {
+                    MoveToEx(hdc, left + 5, top + 5, NULL);
+                    LineTo(hdc, right - 5, bottom - 5);
+                    MoveToEx(hdc, right - 5, top + 5, NULL);
+                    LineTo(hdc, left + 5, bottom - 5);
+                }
+                SelectObject(hdc, hTempPen);
                 DeleteObject(hWhitePen);
-
             }
         }
+
         SelectObject(hdc, hOldPen); // вернули системное перо
         DeleteObject(hLinePen);
 
@@ -438,11 +461,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         if (uMsg == WM_LBUTTONDOWN) type = 1;
         else type = 2;
 
-        // записываем в память словарь
-        g_cells[{cellX, cellY}] = type;
-
-        // перерисовываем окно
-        InvalidateRect(hwnd, NULL, TRUE);
+        // проверяем что клик попал в границы игрового поля
+        if (cellX >= 0 && cellX < g_config.fieldSize && cellY >= 0 && cellY < g_config.fieldSize) {
+            g_pSharedData->cells[cellX][cellY] = type;
+            InvalidateRect(hwnd, NULL, TRUE);
+        }
         return 0;
     }
     case WM_KEYDOWN: {
