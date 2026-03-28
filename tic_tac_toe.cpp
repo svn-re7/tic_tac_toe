@@ -9,6 +9,9 @@
 #include <vector>
 #include <iomanip>
 
+UINT WM_GAME_UPDATE = 0;
+HANDLE hMapFile = NULL;
+
 // структура конфига (бинарная)
 struct ConfigData {
     int N;  // размер клетки
@@ -27,20 +30,12 @@ struct SharedData {
 };
 
 SharedData* g_pSharedData = nullptr;
-SharedData localData = { 0 }; // Временный объект для работы, пока нет маппинга
+
 
 // глобальный экземпляр конфига (по умолчанию)
 ConfigData g_config = { 40, 320, 240, RGB(0, 0, 255), 0, 10};
 int g_method = 2; // переменная для хранения метода чтения/записи (по умолчанию - fopen)
 
-//struct CellPos {
-//    int x, y;
-//    bool operator<(const CellPos& other) const {
-//        if (x != other.x) return x < other.x;
-//        return y < other.y;
-//    }
-//};
-//std::map<CellPos, int> g_cells;
 
 COLORREF GetRainbowColor(int offset) {
     BYTE r, g, b;
@@ -286,10 +281,14 @@ void RunBenchmark() {
 }
 
 
+
+
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam); // функция обработки событий
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
     srand(static_cast<unsigned int>(time(NULL))); // сид для random
+
+    WM_GAME_UPDATE = RegisterWindowMessage(L"UpdateMsg");
 
     bool runBench = false;
     int val = -1; // значения для N
@@ -348,7 +347,39 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         g_config.fieldSize = valS;
     }
 
-    g_pSharedData = &localData;
+    // создаем (открываем) объект в памяти
+    HANDLE hMapFile = CreateFileMapping(
+        INVALID_HANDLE_VALUE,    // используем файл подкачки (не создает реальный файл)
+        NULL,                    // защита по умолчанию
+        PAGE_READWRITE,          // чтение и запись
+        0,
+        sizeof(SharedData),
+        L"Local\\SharedMem" 
+    );
+
+    if (hMapFile == NULL) {
+        return 1;
+    }
+
+    // были ли мы первыми
+    bool isFirst = (GetLastError() != ERROR_ALREADY_EXISTS);
+
+    // получаем указатель на эту память
+    g_pSharedData = (SharedData*)MapViewOfFile(hMapFile, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedData));
+
+    if (g_pSharedData == NULL) {
+        CloseHandle(hMapFile);
+        return 1;
+    }
+
+    // логика если окно - первое
+    if (isFirst) {
+        g_pSharedData->activeWindows = 1;
+        memset(g_pSharedData->cells, 0, sizeof(g_pSharedData->cells)); // очищаем поле
+    }
+    else {
+        g_pSharedData->activeWindows++;
+    }
 
     const wchar_t CLASS_NAME[] = L"MyWinAPIClass";
 
@@ -387,6 +418,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 }
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    if (uMsg == WM_GAME_UPDATE) {
+        InvalidateRect(hwnd, NULL, TRUE);
+        return 0;
+    }
+    
     switch (uMsg) {
     case WM_PAINT: {
         PAINTSTRUCT ps; // хранит инфу какую часть холста нужно перерисовывать
@@ -464,6 +500,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         // проверяем что клик попал в границы игрового поля
         if (cellX >= 0 && cellX < g_config.fieldSize && cellY >= 0 && cellY < g_config.fieldSize) {
             g_pSharedData->cells[cellX][cellY] = type;
+            PostMessage(HWND_BROADCAST, WM_GAME_UPDATE, 0, 0); // оповещаем окна в системе
             InvalidateRect(hwnd, NULL, TRUE);
         }
         return 0;
@@ -545,6 +582,16 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         else if (g_method == 3) SaveConfigMethod3();
         else if (g_method == 4) SaveConfigMethod4();
 
+        if (g_pSharedData) {
+            g_pSharedData->activeWindows--; // если окон больше нет, система сама удалит Mapping
+            UnmapViewOfFile(g_pSharedData);
+
+        }
+
+        if (hMapFile != NULL) {
+            CloseHandle(hMapFile);
+            hMapFile = NULL;
+        }
         PostQuitMessage(0);
         return 0;
     }
