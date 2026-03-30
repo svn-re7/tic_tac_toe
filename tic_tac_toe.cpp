@@ -27,6 +27,8 @@ struct ConfigData {
 struct SharedData {
     int activeWindows;                 // счетчик запущенных копий
     int cells[MAX_FIELD_SIZE][MAX_FIELD_SIZE]; // массив игрового поля (0-пусто 1-круг 2-крест)
+    COLORREF bgColor;     // цвет фона
+    int gridColorOffset;   // цвет сетки
 };
 
 SharedData* g_pSharedData = nullptr;
@@ -348,7 +350,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
 
     // создаем (открываем) объект в памяти
-    HANDLE hMapFile = CreateFileMapping(
+    hMapFile = CreateFileMapping(
         INVALID_HANDLE_VALUE,    // используем файл подкачки (не создает реальный файл)
         NULL,                    // защита по умолчанию
         PAGE_READWRITE,          // чтение и запись
@@ -376,9 +378,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     if (isFirst) {
         g_pSharedData->activeWindows = 1;
         memset(g_pSharedData->cells, 0, sizeof(g_pSharedData->cells)); // очищаем поле
+        g_pSharedData->bgColor = g_config.bgColor; // записываем цвет фона в общую память
+        g_pSharedData->gridColorOffset = g_config.gridColorOffset; // записываем стеки в общую память
     }
     else {
         g_pSharedData->activeWindows++;
+        // обновляем данные конфига
+        g_config.bgColor = g_pSharedData->bgColor;
+        g_config.gridColorOffset = g_pSharedData->gridColorOffset;
     }
 
     const wchar_t CLASS_NAME[] = L"MyWinAPIClass";
@@ -419,6 +426,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     if (uMsg == WM_GAME_UPDATE) {
+        // синхронизируем конфиг
+        g_config.bgColor = g_pSharedData->bgColor;
+        g_config.gridColorOffset = g_pSharedData->gridColorOffset;
+
+        // обновляем кисть фона
+        HBRUSH hNewBrush = CreateSolidBrush(g_config.bgColor);
+        HBRUSH hOldBrush = (HBRUSH)SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)hNewBrush);
+        if (hOldBrush) DeleteObject(hOldBrush);
+
         InvalidateRect(hwnd, NULL, TRUE);
         return 0;
     }
@@ -431,7 +447,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         RECT rect;
         GetClientRect(hwnd, &rect); // узнали рамер окна, в котором рисуем
 
-        COLORREF gridColor = GetRainbowColor(g_config.gridColorOffset); // получаем цвет
+        COLORREF gridColor = GetRainbowColor(g_pSharedData->gridColorOffset); // получаем цвет
         HPEN hLinePen = CreatePen(PS_SOLID, 5, gridColor); // создали кисть для клеток
         HPEN hOldPen = (HPEN)SelectObject(hdc, hLinePen); // взяли кисть
         int width = rect.right; // ширина холста
@@ -557,14 +573,10 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             int r = rand() % 256;
             int g = rand() % 256;
             int b = rand() % 256;
-            g_config.bgColor = RGB(r, g, b);
+            g_pSharedData->bgColor = RGB(r, g, b);
 
-            HBRUSH hNewBrush = CreateSolidBrush(g_config.bgColor);
-            HBRUSH hOldBrush = (HBRUSH)SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)hNewBrush); // заменяет параметр окна
-            if (hOldBrush) DeleteObject(hOldBrush);
+            PostMessage(HWND_BROADCAST, WM_GAME_UPDATE, 0, 0);
 
-            // перерисовываем окно
-            InvalidateRect(hwnd, NULL, TRUE);
             return 0;
         }
         return 0;
@@ -576,17 +588,24 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         g_config.windowW = rect.right - rect.left;
         g_config.windowH = rect.bottom - rect.top;
 
-        // сохраняем конгфиг
-        if (g_method == 1) SaveConfigMethod1();
-        else if (g_method == 2) SaveConfigMethod2();
-        else if (g_method == 3) SaveConfigMethod3();
-        else if (g_method == 4) SaveConfigMethod4();
 
         if (g_pSharedData) {
             g_pSharedData->activeWindows--; // если окон больше нет, система сама удалит Mapping
-            UnmapViewOfFile(g_pSharedData);
 
+            if (g_pSharedData->activeWindows == 0)
+            {
+                g_config.bgColor = g_pSharedData->bgColor;
+                g_config.gridColorOffset = g_pSharedData->gridColorOffset;
+
+                // сохраняем конгфиг
+                if (g_method == 1) SaveConfigMethod1();
+                else if (g_method == 2) SaveConfigMethod2();
+                else if (g_method == 3) SaveConfigMethod3();
+                else if (g_method == 4) SaveConfigMethod4();
+            }
+            UnmapViewOfFile(g_pSharedData);
         }
+
 
         if (hMapFile != NULL) {
             CloseHandle(hMapFile);
@@ -599,14 +618,13 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         int zDelta = GET_WHEEL_DELTA_WPARAM(wParam); // значение прокрутки колеса
 
         if (zDelta > 0) {
-            g_config.gridColorOffset = (g_config.gridColorOffset + 15) % 256;
+            g_pSharedData->gridColorOffset = (g_pSharedData->gridColorOffset + 15) % 256;
         }
         else {
-            g_config.gridColorOffset = (g_config.gridColorOffset - 15 + 256) % 256;
+            g_pSharedData->gridColorOffset = (g_pSharedData->gridColorOffset - 15 + 256) % 256;
         }
 
-        // перерисовываем окно
-        InvalidateRect(hwnd, NULL, TRUE);
+        PostMessage(HWND_BROADCAST, WM_GAME_UPDATE, 0, 0);
         return 0;
     }
 
