@@ -282,7 +282,23 @@ void RunBenchmark() {
     free(bigBuffer);
 }
 
+bool IsPositionFree(int x, int y, int w, int h) {
+    // прямоугольник который мы хотим занять
+    RECT rectNew = { x, y, x + w, y + h };
 
+    HWND hOther = NULL;
+    // ищем окна только нужного класса
+    while ((hOther = FindWindowEx(NULL, hOther, L"MyWinAPIClass", NULL)) != NULL) {
+        RECT rectOther;
+        GetWindowRect(hOther, &rectOther); // получаем координаты окна на экране
+
+        RECT result;
+        if (IntersectRect(&result, &rectNew, &rectOther)) {
+            return false; // место занято
+        }
+    }
+    return true; // пересечения не найдено
+}
 
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam); // функция обработки событий
@@ -400,12 +416,43 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     RegisterClass(&wc);
 
+    RECT workArea;
+    // получаем границы рабочего стола
+    SystemParametersInfo(SPI_GETWORKAREA, 0, &workArea, 0);
+
+    int posX = workArea.left;
+    int posY = workArea.top;
+    bool foundPlace = false;
+
+    // шаг сканирования
+    const int step = 20;
+
+    // сканируем рабочую область
+    for (int y = workArea.top; y <= workArea.bottom - g_config.windowH; y += step) {
+        for (int x = workArea.left; x <= workArea.right - g_config.windowW; x += step) {
+            if (IsPositionFree(x, y, g_config.windowW, g_config.windowH)) {
+                posX = x;
+                posY = y;
+                foundPlace = true;
+                break;
+            }
+        }
+        if (foundPlace) break;
+    }
+
+    // если весь экран забит окнами то используем координаты по умолчанию
+    if (!foundPlace) {
+        posX = CW_USEDEFAULT;
+        posY = CW_USEDEFAULT;
+    }
+
+
     HWND hwnd = CreateWindowEx( // создали окно
         0,
         CLASS_NAME, // имя шаблона
         L"Lab 1",
         WS_OVERLAPPEDWINDOW,            // стиль окна
-        CW_USEDEFAULT, CW_USEDEFAULT,   // x y где создать окно
+        posX, posY,   // x y где создать окно
         g_config.windowW, g_config.windowH,
         NULL, NULL, hInstance, NULL
     );
